@@ -28,14 +28,6 @@ export function injected({ id }: { id: string }): InjectedConnector {
   });
 }
 
-export function kakarot(): InjectedConnector {
-  return new KakarotConnector({
-    options: {
-      id: "kakarot",
-      name: "Kakarot",
-    },
-  });
-}
 
 export function kakarotConnectors(): InjectedConnector[] {
 
@@ -53,13 +45,6 @@ const allProviders = store.getProviders()
 // => [EIP6963ProviderDetail, EIP6963ProviderDetail, ...]
 
   return allProviders.map((provider) => {
-    return new KakarotConnector({
-      ethProvider: provider,
-      options: {
-        id: provider.info.rdns,
-        name: provider.info.name,
-        icon: provider.info.icon
-      },
-    });
+    return new KakarotConnector(provider);
   });
 }

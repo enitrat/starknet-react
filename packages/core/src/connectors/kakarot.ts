@@ -1,3 +1,6 @@
+// Credits to https://github.com/wevm/wagmi for the inspiration on the implementation
+// for the kakarot connector
+
 import {
     type AddDeclareTransactionParameters,
     type AddInvokeTransactionParameters,
@@ -28,8 +31,24 @@ import {
 import { Connector, type ConnectorData, type ConnectorIcons } from "./base";
 import { InjectedConnector, InjectedConnectorOptions } from "./injected";
 import { publicProvider } from "../providers";
-import { createWalletClient, custom, defineChain, encodeAbiParameters, http, toHex, WalletClient } from 'viem'
+import { createWalletClient, custom, defineChain, encodeAbiParameters, http, ProviderMessage, toHex, WalletClient } from 'viem'
 import { EIP6963ProviderDetail } from "mipd";
+import {
+    type AddEthereumChainParameter,
+    type Address,
+    type EIP1193Provider,
+    type ProviderConnectInfo,
+    type ProviderRpcError,
+    ResourceUnavailableRpcError,
+    type RpcError,
+    SwitchChainError,
+    getAddress,
+    numberToHex,
+    withRetry,
+    withTimeout,
+} from 'viem'
+import { ChainNotConfiguredError, ConnectorEventMap, ProviderNotFoundError } from "@wagmi/core";
+import { Emitter } from "@wagmi/core/internal";
 
 
 export const kakarotSepolia = /*#__PURE__*/ defineChain({
@@ -55,6 +74,19 @@ export const kakarotSepolia = /*#__PURE__*/ defineChain({
 });
 
 
+type EthereumConnectorEvents = {
+    onAccountsChanged(accounts: string[]): void
+    onChainChanged(chainId: string): void
+    onConnect?(connectInfo: ProviderConnectInfo): void
+    onDisconnect(error?: Error | undefined): void
+    onMessage?(message: ProviderMessage): void
+}
+
+let accountsChanged: EthereumConnectorEvents['onAccountsChanged'] | undefined
+let chainChanged: EthereumConnectorEvents['onChainChanged'] | undefined
+let connect: EthereumConnectorEvents['onConnect'] | undefined
+let disconnect: EthereumConnectorEvents['onDisconnect'] | undefined
+
 export class KakarotConnector extends InjectedConnector {
     public ethereumConnector: WalletClient | undefined;
     public ethProvider: any
@@ -64,45 +96,152 @@ export class KakarotConnector extends InjectedConnector {
             options: {
                 id: ethProviderDetail.info.uuid,
                 name: ethProviderDetail.info.name,
-                icon: ethProviderDetail.info.icon
+                icon: ethProviderDetail.info.icon,
             }
         });
-        this.ethProvider = ethProviderDetail.provider
+        this.ethProvider = ethProviderDetail.provider;
     }
 
-    switchChain(chainId: bigint): void {
-        if (!this.available()) {
-            throw new ConnectorNotFoundError();
+    async connect(): Promise<ConnectorData> {
+        const provider = await this.getProvider();
+        console.log("provider", provider);
+        if (!provider) throw new Error("Provider not found");
+
+        if (connect) {
+            provider.removeListener('connect', connect)
+            connect = undefined
+          }
+          if (!accountsChanged) {
+            accountsChanged = this.onAccountsChanged.bind(this)
+            provider.on('accountsChanged', accountsChanged)
+          }
+          if (!chainChanged) {
+            chainChanged = this.onChainChanged.bind(this)
+            provider.on('chainChanged', chainChanged)
+          }
+          if (!disconnect) {
+            disconnect = this.onDisconnect.bind(this)
+            provider.on('disconnect', disconnect)
         }
-        let account = this.ethereumConnector?.account?.address;
-        if (chainId === sepolia.id) {
+
+        const address = (await this.getAccounts())[0];
+        console.log("address", address);
+
+        //TODO: how to ensure that the chain is correctly set upon connection?
+        // const currentChainId = await this.ethereumConnector.getChainId();
+        // if (chainId && currentChainId !== chainId) {
+        //     await this.switchChain({ chainId });
+        // }
+
+        const res = {
+            account: address,
+            chainId: BigInt(await this.getChainId()),
+        };
+        this.emit("connect", res);
+        return res;
+    }
+
+
+    async disconnect(): Promise<void> {
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
+
+        // Manage EIP-1193 event listeners
+        if (chainChanged) {
+          provider.removeListener('chainChanged', chainChanged)
+          chainChanged = undefined
+        }
+        if (disconnect) {
+          provider.removeListener('disconnect', disconnect)
+          disconnect = undefined
+        }
+        if (!connect) {
+          connect = this.onConnect.bind(this)
+          provider.on('connect', connect)
+        }
+
+        this.ethereumConnector = undefined;
+        this.emit("disconnect");
+    }
+
+
+    async getProvider(): Promise<any | undefined> {
+        if (typeof window === 'undefined') return undefined;
+        return this.ethProvider;
+    }
+
+    private async getChainId() {
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
+        const kakarotChainId = Number(await provider.request({ method: 'eth_chainId' }))
+        if (kakarotChainId === kakarotSepolia.id) {
+            return sepolia.id
+        } else if (kakarotChainId === 0x1) {
+            // TODO for debug purpose
+            return mainnet.id
+        }
+        throw new Error(`Unknown chain id: ${kakarotChainId}`);
+    }
+
+    private async getEvmChainId() {
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
+        const kakarotChainId = await provider.request({ method: 'eth_chainId' })
+        return kakarotChainId;
+    }
+
+    async getAccounts(): Promise<`0x${string}`[]> {
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
+        const accounts = await provider.request({ method: 'eth_accounts' })
+        return accounts.map((x: string) => getAddress(x))
+    }
+
+    async switchChain(starknetChainId: bigint): Promise<void> {
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
+
+        let kakarotChainId: number = 1;
+        if (starknetChainId === sepolia.id) {
             console.log("switch to sepolia");
-            this.ethereumConnector?.switchChain({ id: kakarotSepolia.id });
-        } else if (chainId === mainnet.id) {
+            kakarotChainId = kakarotSepolia.id;
+        } else if (starknetChainId === mainnet.id) {
             // throw new Error("Kakarot Mainnet not supported");
             // TODO for debug purpose
-            this.ethereumConnector?.switchChain({ id: 1 });
+            kakarotChainId = 1;
         }
-        this.emit("change", { chainId, account });
-    }
-    async switchAccount(accountIndex: number): Promise<void> {
-        if (!this.available()) {
-            throw new ConnectorNotFoundError();
-        }
-        const addresses = await this.ethereumConnector!.getAddresses();
-        if (addresses.length <= accountIndex) {
-            throw new Error("Account index out of bounds");
-        }
-        const chainId = await this.ethereumConnector!.getChainId();
-        const newAccount = {
-            account: addresses[accountIndex],
-            chainId: BigInt(chainId),
-        };
-        this.emit("change", newAccount);
+
+        await Promise.all([
+            provider
+                .request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: numberToHex(kakarotChainId) }],
+                })
+                // During `'wallet_switchEthereumChain'`, MetaMask makes a `'net_version'` RPC call to the target chain.
+                // If this request fails, MetaMask does not emit the `'chainChanged'` event, but will still switch the chain.
+                // To counter this behavior, we request and emit the current chain ID to confirm the chain switch either via
+                // this callback or an externally emitted `'chainChanged'` event.
+                // https://github.com/MetaMask/metamask-extension/issues/24247
+                .then(async () => {
+                const currentChainId = await this.getChainId()
+                if (currentChainId === starknetChainId)
+                    this.emit('change', { chainId: BigInt(starknetChainId) })
+                }),
+            new Promise<void>((resolve) => {
+                const listener = ((data: any) => {
+                if ('chainId' in data && data.chainId === starknetChainId) {
+                    this.emit('change', { chainId: BigInt(starknetChainId) })
+                    resolve()
+                }
+                })
+                this.on('change', listener)
+            }),
+        ])
     }
 
     available(): boolean {
-        return this.ethereumConnector !== undefined;
+        if (typeof window === 'undefined') return false;
+        return this.ethProvider !== undefined;
     }
 
     async chainId(): Promise<bigint> {
@@ -111,39 +250,14 @@ export class KakarotConnector extends InjectedConnector {
 
     async ready(): Promise<boolean> {
         //TODO fix this one
-        return this.ethereumConnector?.account?.address !== undefined;
-    }
-
-    async connect(): Promise<ConnectorData> {
-        const [address] = await createWalletClient({
-            chain: kakarotSepolia,
-            transport: custom(window.ethereum),
-        }).requestAddresses();
-
-        const client = createWalletClient({
-            chain: kakarotSepolia,
-            transport: custom(window.ethereum!),
-            account: address,
-        });
-        this.ethereumConnector = client;
-        const res = {
-            account: address,
-            chainId: BigInt(await client.getChainId()),
-        };
-        this.emit("connect", res);
-        console.log("emit connect", res);
-        return res;
-    }
-
-    async disconnect(): Promise<void> {
-        this.ethereumConnector = undefined;
-        this.emit("disconnect");
+        return this.ethProvider !== undefined;
     }
 
     async request<T extends RpcMessage["type"]>(
         call: RequestFnCall<T>,
     ): Promise<RpcTypeToMessageMap[T]["result"]> {
-        console.log("request", call);
+        const provider = await this.getProvider()
+        if (!provider) throw new ProviderNotFoundError()
         const { type, params } = call;
 
         if (!this.available()) {
@@ -152,17 +266,29 @@ export class KakarotConnector extends InjectedConnector {
 
         switch (type) {
             case "wallet_requestChainId":
-                return toHex(await this.ethereumConnector!.getChainId());
+                return await this.getChainId().toString();
             case "wallet_getPermissions":
-                const permissions = await this.ethereumConnector!.request({
+                const permissions = await provider.request({
                     method: 'wallet_requestPermissions',
                     params: [{ eth_accounts: {} }],
-                })
-                return [];
+                  })
+                  let accounts = (permissions[0]?.caveats?.[0]?.value as string[])?.map(
+                    (x) => getAddress(x),
+                  )
+                  // `'wallet_requestPermissions'` can return a different order of accounts than `'eth_accounts'`
+                  // switch to `'eth_accounts'` ordering if more than one account is connected
+                  // https://github.com/wevm/wagmi/issues/4140
+                  if (accounts.length > 0) {
+                    const sortedAccounts = await this.getAccounts()
+                    accounts = sortedAccounts
+                  }
+                  return accounts;
             case "wallet_requestAccounts":
-                const accounts = await this.ethereumConnector!.requestAddresses();
-                //TODO: map them to starknet addresses ?
-                return accounts;
+                if (!provider) throw new ProviderNotFoundError()
+                const requestedAccounts = await provider.request({
+                    method: 'eth_requestAccounts',
+                  })
+                  return requestedAccounts.map((x: string) => getAddress(x))
             case "wallet_addStarknetChain":
                 return false;
             case "wallet_watchAsset":
@@ -191,21 +317,26 @@ export class KakarotConnector extends InjectedConnector {
             case "wallet_signTypedData": {
                 if (!params) throw new Error("Params are missing");
 
+                // authorize signTypedData
+                const permissions = await provider.request({
+                    method: 'wallet_requestPermissions',
+                    params: [    {
+                        'eth_accounts': {
+                          requiredMethods: ['signTypedData_v4']
+                        }
+                      }
+                  ],
+                })
+
                 //TODO: is it the right typing?
                 const { domain, message, primaryType, types } = params as TypedData;
+                const accounts = await this.getAccounts()
 
-                return this.ethereumConnector!.signMessage({
-                    account: this.ethereumConnector!.account!.address,
-                    message: message as unknown as string,
+                //TODO: figure out a way of getting this to work due to different data format ?
+                return provider.request({
+                    method: 'eth_signTypedData_v4',
+                    params: [accounts[0], domain, message, primaryType, types],
                 });
-
-                //TODO: sign message
-                //   return (await this._account.signMessage({
-                //     domain,
-                //     message,
-                //     primaryType,
-                //     types,
-                //   })) as string[];
             }
             default:
                 throw new Error("Unknown request type");
@@ -215,13 +346,99 @@ export class KakarotConnector extends InjectedConnector {
     async account(
         provider: ProviderOptions | ProviderInterface,
     ): Promise<AccountInterface> {
-        console.log("account called");
+        //TODO: is returning an empty account okay?
         if (!this.available()) {
             throw new ConnectorNotFoundError();
         }
         return new Account(provider, "", "");
     }
 
+    // Listeners for wallet events
+
+    protected async onAccountsChanged(accounts?: string[]) {
+        if (!accounts) {
+            this.disconnect();
+            return;
+        }
+        // Disconnect if there are no accounts
+        if (accounts.length === 0) {
+            this.disconnect();
+            return;
+        }
+        this.emit('change', {
+        account: accounts[0]
+        })
+    }
+
+    private async onChainChanged(chain: string) {
+        const kakarotChainId = BigInt(chain)
+        if (kakarotChainId === BigInt(kakarotSepolia.id)) {
+            this.emit('change', { chainId: sepolia.id });
+            return;
+        } else if (kakarotChainId === BigInt(1)) {
+            this.emit('change', { chainId: mainnet.id });
+            return;
+        }
+        throw new Error(`Unknown chain id: ${kakarotChainId}`);
+      }
+      private async onConnect(connectInfo: ProviderConnectInfo) {
+        const accounts = await this.getAccounts()
+        if (accounts.length === 0) return
+
+        const chainId = BigInt(connectInfo.chainId)
+        this.emit('connect', { account: accounts[0], chainId })
+
+        // Manage EIP-1193 event listeners
+        const provider = await this.getProvider()
+        if (provider) {
+          if (connect) {
+            provider.removeListener('connect', connect)
+            connect = undefined
+          }
+          if (!accountsChanged) {
+            accountsChanged = this.onAccountsChanged.bind(this)
+            provider.on('accountsChanged', accountsChanged)
+          }
+          if (!chainChanged) {
+            chainChanged = this.onChainChanged.bind(this)
+            provider.on('chainChanged', chainChanged)
+          }
+          if (!disconnect) {
+            disconnect = this.onDisconnect.bind(this)
+            provider.on('disconnect', disconnect)
+          }
+        }
+      }
+      private async onDisconnect(error: any) {
+        const provider = await this.getProvider()
+
+        // If MetaMask emits a `code: 1013` error, wait for reconnection before disconnecting
+        // https://github.com/MetaMask/providers/pull/120
+        if (error && (error as RpcError<1013>).code === 1013) {
+          if (provider && !!(await this.getAccounts()).length) return
+        }
+
+        // No need to remove `${this.id}.disconnected` from storage because `onDisconnect` is typically
+        // only called when the wallet is disconnected through the wallet's interface, meaning the wallet
+        // actually disconnected and we don't need to simulate it.
+        this.emit('disconnect')
+
+        // Manage EIP-1193 event listeners
+        if (provider) {
+          if (chainChanged) {
+            provider.removeListener('chainChanged', chainChanged)
+            chainChanged = undefined
+          }
+          if (disconnect) {
+            provider.removeListener('disconnect', disconnect)
+            disconnect = undefined
+          }
+          if (!connect) {
+            connect = this.onConnect.bind(this)
+            provider.on('connect', connect)
+          }
+        }
+    }
 }
 
 const prepareTransactionData = (calls: RequestCall[]) => {

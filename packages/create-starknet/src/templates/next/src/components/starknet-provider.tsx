@@ -6,6 +6,7 @@ import {
   StarknetConfig,
   argent,
   braavos,
+  kakarot,
   publicProvider,
   useInjectedConnectors,
   voyager,
@@ -14,7 +15,7 @@ import {
 export function StarknetProvider({ children }: { children: ReactNode }) {
   const { connectors } = useInjectedConnectors({
     // Show these connectors if the user has no connector installed.
-    recommended: [argent(), braavos()],
+    recommended: [argent(), braavos(), ...kakarotConnectors()],
     // Hide recommended connectors if the user has any connector installed.
     includeRecommended: "onlyIfNoConnectors",
     // Randomize the order of the connectors.
