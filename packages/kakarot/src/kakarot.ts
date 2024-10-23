@@ -1,3 +1,6 @@
+// Credits to https://github.com/wevm/wagmi for the inspiration on the implementation
+// for the kakarot connector
+
 import type {
   AddInvokeTransactionParameters,
   Call as RequestCall,
@@ -22,6 +25,7 @@ import {
   hash,
 } from "starknet";
 import {
+  EIP1193Provider,
   type ProviderConnectInfo,
   type ProviderMessage,
   type RpcError,
@@ -30,12 +34,21 @@ import {
   getAddress,
   numberToHex,
   toHex,
+  withTimeout,
 } from "viem";
 import { kakarotSepolia } from "./chains";
+
+const MULTICALL_CAIRO_PRECOMPILE = "0x0000000000000000000000000000000000750003";
 
 class ProviderNotFoundError extends Error {
   constructor() {
     super("Provider not found.");
+  }
+}
+
+class ChainIdInvalidError extends Error {
+  constructor(chainId: bigint) {
+    super(`Chain id invalid: ${chainId}`);
   }
 }
 
@@ -53,8 +66,7 @@ let connect: EthereumConnectorEvents["onConnect"] | undefined;
 let disconnect: EthereumConnectorEvents["onDisconnect"] | undefined;
 
 export class KakarotConnector extends InjectedConnector {
-  public ethereumConnector: WalletClient | undefined;
-  public ethProvider: any;
+  public ethProvider: EIP1193Provider;
 
   constructor(ethProviderDetail: EIP6963ProviderDetail) {
     super({
@@ -128,11 +140,31 @@ export class KakarotConnector extends InjectedConnector {
       provider.on("connect", connect);
     }
 
-    this.ethereumConnector = undefined;
+    // Experimental support for MetaMask disconnect
+    // https://github.com/MetaMask/metamask-improvement-proposals/blob/main/MIPs/mip-2.md
+    try {
+      // Adding timeout as not all wallets support this method and can hang
+      // https://github.com/wevm/wagmi/issues/4064
+      await withTimeout(
+        () =>
+          // TODO: Remove explicit type for viem@3
+          provider.request<{
+            Method: "wallet_revokePermissions";
+            Parameters: [permissions: { eth_accounts: Record<string, any> }];
+            ReturnType: null;
+          }>({
+            // `'wallet_revokePermissions'` added in `viem@2.10.3`
+            method: "wallet_revokePermissions",
+            params: [{ eth_accounts: {} }],
+          }),
+        { timeout: 100 },
+      );
+    } catch {}
+
     this.emit("disconnect");
   }
 
-  async getProvider(): Promise<any | undefined> {
+  async getProvider(): Promise<EIP1193Provider | undefined> {
     if (typeof window === "undefined") return undefined;
     return this.ethProvider;
   }
@@ -239,6 +271,7 @@ export class KakarotConnector extends InjectedConnector {
       case "wallet_requestChainId":
         return await this.getChainId().toString();
       case "wallet_getPermissions":
+        //TODO: check if this is the expected returndata
         const permissions = await provider.request({
           method: "wallet_requestPermissions",
           params: [{ eth_accounts: {} }],
@@ -283,7 +316,7 @@ export class KakarotConnector extends InjectedConnector {
           params: [
             {
               from: account,
-              to: "0x0000000000000000000000000000000000750003",
+              to: MULTICALL_CAIRO_PRECOMPILE,
               data: prepareTransactionData(calls),
             },
           ],
@@ -329,21 +362,22 @@ export class KakarotConnector extends InjectedConnector {
     return new Account(provider, "", "");
   }
 
-  // Listeners for wallet events
-
+  // Listeners for EVM wallet events
   protected async onAccountsChanged(accounts?: string[]) {
-    if (!accounts) {
-      this.disconnect();
+    if (!accounts || accounts.length === 0) {
+      this.onDisconnect();
       return;
     }
-    // Disconnect if there are no accounts
-    if (accounts.length === 0) {
-      this.disconnect();
-      return;
+
+    // Connect if emitter is listening for connect event (e.g. is disconnected and connects through wallet interface)
+    if (this.listenerCount("connect")) {
+      const chainId = (await this.getChainId()).toString();
+      this.onConnect({ chainId });
+    } else {
+      this.emit("change", {
+        account: accounts[0],
+      });
     }
-    this.emit("change", {
-      account: accounts[0],
-    });
   }
 
   private async onChainChanged(chain: string) {
@@ -355,7 +389,7 @@ export class KakarotConnector extends InjectedConnector {
       this.emit("change", { chainId: mainnet.id });
       return;
     }
-    throw new Error(`Unknown chain id: ${kakarotChainId}`);
+    throw new ChainIdInvalidError(kakarotChainId);
   }
   private async onConnect(connectInfo: ProviderConnectInfo) {
     const accounts = await this.getAccounts();
@@ -385,8 +419,9 @@ export class KakarotConnector extends InjectedConnector {
       }
     }
   }
-  private async onDisconnect(error: any) {
+  private async onDisconnect(error?: Error) {
     const provider = await this.getProvider();
+    if (!provider) throw new ProviderNotFoundError();
 
     // If MetaMask emits a `code: 1013` error, wait for reconnection before disconnecting
     // https://github.com/MetaMask/providers/pull/120
