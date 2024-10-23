@@ -142,6 +142,7 @@ export class KakarotConnector extends Connector {
       await this.switchChain(chainIdHint);
     } catch (error) {
       this.disconnect();
+      throw new Error("Could not connect to the requested chain");
     }
 
     const starknetAddress = await this.resolveStarknetAddress(address);
@@ -261,7 +262,7 @@ export class KakarotConnector extends Connector {
       new Promise<void>((resolve) => {
         const listener = (data: any) => {
           if ("chainId" in data && data.chainId === starknetChainId) {
-            this.emit("change", { chainId: BigInt(starknetChainId) });
+            this.off("change", listener);
             resolve();
           }
         };
