@@ -12,22 +12,25 @@ import type {
 } from "@starknet-io/types-js";
 import { mainnet, sepolia } from "@starknet-react/chains";
 import {
-  ChainProviderFactory,
+  type ChainProviderFactory,
+  Connector,
   ConnectorNotFoundError,
-  InjectedConnector,
 } from "@starknet-react/core";
-import type { ConnectorData } from "@starknet-react/core/src/connectors/base";
+import type {
+  ConnectorData,
+  ConnectorIcons,
+} from "@starknet-react/core/src/connectors/base";
 import type { EIP6963ProviderDetail } from "mipd";
 import {
   Account,
   type AccountInterface,
   type ProviderInterface,
   type ProviderOptions,
-  RpcProvider,
+  type RpcProvider,
   hash,
 } from "starknet";
 import {
-  EIP1193Provider,
+  type EIP1193Provider,
   type ProviderConnectInfo,
   type ProviderMessage,
   type RpcError,
@@ -67,7 +70,13 @@ let chainChanged: EthereumConnectorEvents["onChainChanged"] | undefined;
 let connect: EthereumConnectorEvents["onConnect"] | undefined;
 let disconnect: EthereumConnectorEvents["onDisconnect"] | undefined;
 
-export class KakarotConnector extends InjectedConnector {
+export interface KakarotConnectorOptions {
+  id: string;
+  name: string;
+  icon: ConnectorIcons;
+}
+export class KakarotConnector extends Connector {
+  private _options: KakarotConnectorOptions;
   public ethProvider: EIP1193Provider;
   public starknetRpcProvider: ChainProviderFactory<RpcProvider>;
 
@@ -75,18 +84,31 @@ export class KakarotConnector extends InjectedConnector {
     ethProviderDetail: EIP6963ProviderDetail,
     starknetRpcProvider: ChainProviderFactory<RpcProvider>,
   ) {
-    super({
-      options: {
-        id: ethProviderDetail.info.rdns,
-        name: ethProviderDetail.info.name,
-        icon: ethProviderDetail.info.icon,
-      },
-    });
+    super();
+    this._options = {
+      id: ethProviderDetail.info.rdns,
+      name: ethProviderDetail.info.name,
+      icon: ethProviderDetail.info.icon,
+    };
     this.ethProvider = ethProviderDetail.provider;
     this.starknetRpcProvider = starknetRpcProvider;
   }
 
-  async connect(): Promise<ConnectorData> {
+  get id(): string {
+    return this._options.id;
+  }
+
+  get name(): string {
+    return this._options.name;
+  }
+
+  get icon(): ConnectorIcons {
+    return this._options.icon;
+  }
+
+  async connect({
+    chainIdHint,
+  }: { chainIdHint: bigint }): Promise<ConnectorData> {
     const provider = await this.getProvider();
     if (!provider) throw new Error("Provider not found");
 
@@ -115,11 +137,12 @@ export class KakarotConnector extends InjectedConnector {
       provider.on("disconnect", disconnect);
     }
 
-    //TODO: how to ensure that the chain is correctly set upon connection?
-    // const currentChainId = await this.ethereumConnector.getChainId();
-    // if (chainId && currentChainId !== chainId) {
-    //     await this.switchChain({ chainId });
-    // }
+    // Ensure a kakarot-compatible chain is set
+    try {
+      await this.switchChain(chainIdHint);
+    } catch (error) {
+      this.disconnect();
+    }
 
     const starknetAddress = await this.resolveStarknetAddress(address);
     const res = {
@@ -212,7 +235,6 @@ export class KakarotConnector extends InjectedConnector {
 
     let kakarotChainId = 1;
     if (starknetChainId === sepolia.id) {
-      console.log("switch to sepolia");
       kakarotChainId = kakarotSepolia.id;
     } else if (starknetChainId === mainnet.id) {
       // throw new Error("Kakarot Mainnet not supported");
@@ -350,10 +372,10 @@ export class KakarotConnector extends InjectedConnector {
         const accounts = await this.getAccounts();
 
         //TODO: figure out a way of getting this to work due to different data format ?
-        return provider.request({
-          method: "eth_signTypedData_v4",
-          params: [accounts[0], domain, message, primaryType, types],
-        });
+        // return provider.request({
+        //   method: "eth_signTypedData_v4",
+        //   params: [accounts[0], domain, message, primaryType, types],
+        // });
       }
       default:
         throw new Error("Unknown request type");

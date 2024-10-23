@@ -45,7 +45,7 @@ export abstract class Connector extends EventEmitter<ConnectorEvents> {
   /** Whether connector is already authorized */
   abstract ready(): Promise<boolean>;
   /** Connect wallet. */
-  abstract connect(): Promise<ConnectorData>;
+  abstract connect(parameters: { chainIdHint: bigint }): Promise<ConnectorData>;
   /** Disconnect wallet. */
   abstract disconnect(): Promise<void>;
   /** Get current account. */
