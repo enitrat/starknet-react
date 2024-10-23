@@ -12,6 +12,7 @@ import type {
 } from "@starknet-io/types-js";
 import { mainnet, sepolia } from "@starknet-react/chains";
 import {
+  ChainProviderFactory,
   ConnectorNotFoundError,
   InjectedConnector,
 } from "@starknet-react/core";
@@ -22,6 +23,7 @@ import {
   type AccountInterface,
   type ProviderInterface,
   type ProviderOptions,
+  RpcProvider,
   hash,
 } from "starknet";
 import {
@@ -36,7 +38,7 @@ import {
   toHex,
   withTimeout,
 } from "viem";
-import { kakarotSepolia } from "./chains";
+import { KAKAROT_DEPLOYMENTS, kakarotSepolia } from "./chains";
 
 const MULTICALL_CAIRO_PRECOMPILE = "0x0000000000000000000000000000000000750003";
 
@@ -67,8 +69,12 @@ let disconnect: EthereumConnectorEvents["onDisconnect"] | undefined;
 
 export class KakarotConnector extends InjectedConnector {
   public ethProvider: EIP1193Provider;
+  public starknetRpcProvider: ChainProviderFactory<RpcProvider>;
 
-  constructor(ethProviderDetail: EIP6963ProviderDetail) {
+  constructor(
+    ethProviderDetail: EIP6963ProviderDetail,
+    starknetRpcProvider: ChainProviderFactory<RpcProvider>,
+  ) {
     super({
       options: {
         id: ethProviderDetail.info.rdns,
@@ -77,6 +83,7 @@ export class KakarotConnector extends InjectedConnector {
       },
     });
     this.ethProvider = ethProviderDetail.provider;
+    this.starknetRpcProvider = starknetRpcProvider;
   }
 
   async connect(): Promise<ConnectorData> {
@@ -114,8 +121,9 @@ export class KakarotConnector extends InjectedConnector {
     //     await this.switchChain({ chainId });
     // }
 
+    const starknetAddress = await this.resolveStarknetAddress(address);
     const res = {
-      account: address,
+      account: starknetAddress,
       chainId: BigInt(await this.getChainId()),
     };
     this.emit("connect", res);
@@ -449,6 +457,26 @@ export class KakarotConnector extends InjectedConnector {
         provider.on("connect", connect);
       }
     }
+  }
+
+  private async resolveStarknetAddress(address: string): Promise<string> {
+    const kakarotAddress = KAKAROT_DEPLOYMENTS.sepolia;
+    const activeChainId = await this.getChainId();
+    const chains = [sepolia, mainnet];
+    const chain = chains.find((chain) => chain.id === activeChainId);
+    if (!chain) throw new Error(`Unknown chain id: ${activeChainId}`);
+    const response = await this.starknetRpcProvider(chain)?.callContract({
+      contractAddress: kakarotAddress,
+      entrypoint: "get_starknet_address",
+      calldata: [address],
+    });
+    console.log(response);
+    if (!response) throw new Error("Failed to resolve starknet address");
+    const starknetAddress = response[0];
+    console.log(
+      `Resolved starknet address: ${starknetAddress} for address: ${address}`,
+    );
+    return starknetAddress;
   }
 }
 
