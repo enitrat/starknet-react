@@ -10,4 +10,4 @@ export {
   type MockConnectorAccounts,
   type MockConnectorOptions,
 } from "./mock";
-export { argent, braavos, injected, kakarotConnectors } from "./helpers";
+export { argent, braavos, injected } from "./helpers";

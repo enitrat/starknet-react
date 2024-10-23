@@ -6,11 +6,11 @@ import {
   StarknetConfig,
   argent,
   braavos,
-  kakarot,
   publicProvider,
   useInjectedConnectors,
   voyager,
 } from "@starknet-react/core";
+import { kakarotConnectors } from "@starknet-react/kakarot";
 
 export function StarknetProvider({ children }: { children: ReactNode }) {
   const { connectors } = useInjectedConnectors({

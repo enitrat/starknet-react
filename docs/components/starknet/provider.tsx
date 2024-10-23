@@ -4,10 +4,10 @@ import {
   StarknetConfig,
   argent,
   braavos,
-  kakarotConnectors,
   publicProvider,
   useInjectedConnectors,
 } from "@starknet-react/core";
+import { kakarotConnectors } from "@starknet-react/kakarot";
 
 export function StarknetProvider({
   defaultChainId,

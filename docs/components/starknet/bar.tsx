@@ -21,7 +21,7 @@ function ConnectedWallet({ address }: { address: `0x${string}` }) {
 }
 
 function ConnectWallet() {
-  const { connect, connectors, status, error } = useConnect();
+  const { connect, connectors, status } = useConnect();
 
   return (
     <div className="flex h-full items-center justify-between">
